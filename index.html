@@ -435,11 +435,11 @@ body.locked { padding-bottom: 40px; }
 
 <nav class="tabbar" role="tablist" aria-label="Sections">
   <button role="tab" data-v="add" aria-selected="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>Add</button>
-  <button role="tab" data-v="budget" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Budget</button>
   <button role="tab" data-v="spend" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Spending</button>
   <button role="tab" data-v="income" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>Income</button>
-  <button role="tab" data-v="tithe" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M12 2v3M10.5 9L12 5l1.5 4M9 21V12l3-3 3 3v9M4 21v-6l5-3M20 21v-6l-5-3M3 21h18M11 21v-3h2v3"/></svg>Tithing</button>
+  <button role="tab" data-v="budget" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Budget</button>
   <button role="tab" data-v="save" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>Savings</button>
+  <button role="tab" data-v="tithe" aria-selected="false"><svg viewBox="0 0 24 24"><path d="M12 2v3M10.5 9L12 5l1.5 4M9 21V12l3-3 3 3v9M4 21v-6l5-3M20 21v-6l-5-3M3 21h18M11 21v-3h2v3"/></svg>Tithing</button>
 </nav>
 
 <script>
@@ -607,7 +607,17 @@ body.locked { padding-bottom: 40px; }
     return outbox().filter((o) => !have.has(o.id)).map((o) => Object.assign({}, o.entry, { id: o.id, waiting: true })).concat(list);
   }
   // only category names are remembered, so the Add tab still has buttons when the app opens with no signal
-  function rememberCats(c) { try { if (c && c.expenseCategories) localStorage.setItem(CATS_KEY, JSON.stringify({ expenseCategories: c.expenseCategories, incomeCategories: c.incomeCategories || [] })); } catch (e) {} }
+  // most used first (count of entries this year); ties and unused ones keep their usual order
+  function byUse(list, rows) {
+    const n = {}; rows.forEach((x) => { n[x.c] = (n[x.c] || 0) + 1; });
+    return list.map((c, i) => [c, i]).sort((a, b) => (n[b[0]] || 0) - (n[a[0]] || 0) || a[1] - b[1]).map((x) => x[0]);
+  }
+  function orderedCats(c) {
+    const ex = c.expenseCategories || [], inc = c.incomeCategories || [];
+    if (!overview) return { expenseCategories: ex, incomeCategories: inc };
+    return { expenseCategories: byUse(ex, allExpenses()), incomeCategories: byUse(inc, allIncome()) };
+  }
+  function rememberCats(c) { try { if (c && c.expenseCategories) localStorage.setItem(CATS_KEY, JSON.stringify(orderedCats(c))); } catch (e) {} }
   function savedCats() { try { return JSON.parse(localStorage.getItem(CATS_KEY) || "null"); } catch (e) { return null; } }
   const isNetErr = (e) => !navigator.onLine || (e && (e.name === "TypeError" || e.status >= 500 || /^(read|write|list) 5\d\d$/.test(e.message || "")));
   let flushing = false;
@@ -666,7 +676,7 @@ body.locked { padding-bottom: 40px; }
   function stat(box, label, value, cls) { const s = el("div", "stat"); s.append(el("div", "eyebrow", label), el("div", "v" + (cls ? " " + cls : ""), value)); box.appendChild(s); }
 
   // ---------- ADD view
-  function categories() { const c = config || savedCats(); if (!c) return []; return kind === "Expense" ? (c.expenseCategories || []) : (c.incomeCategories || []); }
+  function categories() { const c = config ? orderedCats(config) : savedCats(); if (!c) return []; return kind === "Expense" ? (c.expenseCategories || []) : (c.incomeCategories || []); }
   function setKind(k) {
     kind = k; category = "";
     $("tExp").setAttribute("aria-pressed", k === "Expense"); $("tInc").setAttribute("aria-pressed", k === "Income");
