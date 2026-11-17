@@ -548,8 +548,9 @@ body.locked { padding-bottom: 40px; }
         }));
         return rows.filter(Boolean).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
       },
-      async addEntry(entry) {
-        const id = newId(), path = "entries/" + id + ".json";
+      newId: newId,
+      async addEntry(entry, fixedId) {
+        const id = fixedId || newId(), path = "entries/" + id + ".json";
         const out = await writeFile(path, JSON.stringify(entry, null, 2) + "\n", null, "Add entry from phone");
         return Object.assign({}, entry, { id: id, sha: out.content.sha, path: path });
       },
@@ -597,6 +598,37 @@ body.locked { padding-bottom: 40px; }
   const isTithe = (x) => x.c === "Tithing";
   const spending = (rows) => rows.filter((x) => !isTithe(x));
   const tithing = (rows) => rows.filter(isTithe);
+  // ---------- offline: entries saved with no signal wait on this phone, then send themselves
+  const OUTBOX_KEY = "hessfinance.outbox", CATS_KEY = "hessfinance.cats";
+  function outbox() { try { const o = JSON.parse(localStorage.getItem(OUTBOX_KEY) || "[]"); return Array.isArray(o) ? o : []; } catch (e) { return []; } }
+  function setOutbox(list) { try { if (list.length) localStorage.setItem(OUTBOX_KEY, JSON.stringify(list)); else localStorage.removeItem(OUTBOX_KEY); return true; } catch (e) { return false; } }
+  function withOutbox(list) {
+    const have = new Set(list.map((p) => p.id));
+    return outbox().filter((o) => !have.has(o.id)).map((o) => Object.assign({}, o.entry, { id: o.id, waiting: true })).concat(list);
+  }
+  // only category names are remembered, so the Add tab still has buttons when the app opens with no signal
+  function rememberCats(c) { try { if (c && c.expenseCategories) localStorage.setItem(CATS_KEY, JSON.stringify({ expenseCategories: c.expenseCategories, incomeCategories: c.incomeCategories || [] })); } catch (e) {} }
+  function savedCats() { try { return JSON.parse(localStorage.getItem(CATS_KEY) || "null"); } catch (e) { return null; } }
+  const isNetErr = (e) => !navigator.onLine || (e && (e.name === "TypeError" || e.status >= 500 || /^(read|write|list) 5\d\d$/.test(e.message || "")));
+  let flushing = false;
+  async function flushOutbox() {
+    if (flushing || !store.ready()) return 0;
+    let list = outbox(); if (!list.length) return 0;
+    flushing = true; let sent = 0;
+    try {
+      for (const o of list) {
+        try { await store.addEntry(o.entry, o.id); }
+        catch (e) {
+          if (e && e.status === 422) { /* already reached GitHub on an earlier try */ }
+          else break;  // still offline, or the key needs fixing; keep it for next time
+        }
+        list = outbox().filter((x) => x.id !== o.id); setOutbox(list); sent++;
+      }
+    } finally { flushing = false; }
+    return sent;
+  }
+  function waitingNote() { const n = outbox().length; return n ? n + (n === 1 ? " entry is" : " entries are") + " saved on this phone and will send when you're back online." : ""; }
+
   function budgets() { return (overview && overview.budgets) || (config && config.budgets) || {}; }
   function lastMonthIdx() { const y = year(), now = new Date(); return y < now.getFullYear() ? 11 : now.getMonth(); }
 
@@ -634,7 +666,7 @@ body.locked { padding-bottom: 40px; }
   function stat(box, label, value, cls) { const s = el("div", "stat"); s.append(el("div", "eyebrow", label), el("div", "v" + (cls ? " " + cls : ""), value)); box.appendChild(s); }
 
   // ---------- ADD view
-  function categories() { if (!config) return []; return kind === "Expense" ? (config.expenseCategories || []) : (config.incomeCategories || []); }
+  function categories() { const c = config || savedCats(); if (!c) return []; return kind === "Expense" ? (c.expenseCategories || []) : (c.incomeCategories || []); }
   function setKind(k) {
     kind = k; category = "";
     $("tExp").setAttribute("aria-pressed", k === "Expense"); $("tInc").setAttribute("aria-pressed", k === "Income");
@@ -695,12 +727,14 @@ body.locked { padding-bottom: 40px; }
     if (!pending.length) { box.appendChild(el("div", "empty", "Nothing waiting. New entries show up here until they're added to your workbook.")); return; }
     pending.forEach((p) => {
       const r = el("div", "item" + (seen && !seen.has(p.id) ? " pop" : "")); const t = el("div", "t");
-      t.append(el("b", null, p.category), el("small", null, fmtDay(p.date) + (p.forMonth ? " · for " + fmtForMonth(p.forMonth) : "") + (p.notes ? " · " + p.notes : "") + (p.kind === "Income" && p.description ? " · " + p.description : "")));
+      const nm = el("b", null, p.category); if (p.waiting) nm.appendChild(el("span", "tag", "waiting to send"));
+      t.append(nm, el("small", null, fmtDay(p.date) + (p.forMonth ? " · for " + fmtForMonth(p.forMonth) : "") + (p.notes ? " · " + p.notes : "") + (p.kind === "Income" && p.description ? " · " + p.description : "")));
       const a = el("span", "num" + (p.kind === "Income" ? " inc" : ""), (p.kind === "Income" ? "+" : "") + money(p.amount));
       const del = el("button", "del" + (confirmId === p.id ? " confirm" : ""), confirmId === p.id ? "Delete?" : "Remove"); del.type = "button";
       del.onclick = async () => {
         if (confirmId !== p.id) { confirmId = p.id; renderQueue(); return; }
         confirmId = null;
+        if (p.waiting) { setOutbox(outbox().filter((o) => o.id !== p.id)); pending = pending.filter((x) => x.id !== p.id); banner(navigator.onLine ? "" : "No signal. " + waitingNote()); renderAll(); return; }
         try { await store.removeEntry(p); pending = pending.filter((x) => x.id !== p.id); renderAll(); } catch (e) { hint(e && e.auth ? e.message : "Couldn't remove that entry. Try again.", "err"); }
       };
       r.append(t, a, del); box.appendChild(r);
@@ -719,10 +753,19 @@ body.locked { padding-bottom: 40px; }
     const entry = { kind, amount, category, date, notes: note, description: kind === "Income" ? ($("desc").value.trim() || "Paycheck") : "", createdAt: new Date().toISOString() };
     if (kind === "Expense" && category === "Tithing" && $("forMonth").value) entry.forMonth = $("forMonth").value;
     $("save").disabled = true;
+    const id = store.newId();
     try {
-      const saved = await store.addEntry(entry);
+      let saved, offline = false;
+      try { saved = await store.addEntry(entry, id); }
+      catch (e) {
+        if (e && e.auth) throw e;
+        if (!isNetErr(e)) throw e;
+        if (!setOutbox(outbox().concat([{ id, entry }]))) throw e;  // phone storage blocked, so fall back to the old error
+        saved = Object.assign({}, entry, { id, waiting: true }); offline = true;
+      }
       pending = [saved].concat(pending); renderAll();
-      hint("Saved " + category + " " + money(amount) + (entry.forMonth ? " for " + fmtForMonth(entry.forMonth) : "") + ". It goes into Excel at the next sync.", "ok");
+      if (offline) { banner("No signal. " + waitingNote()); hint("No signal, so " + category + " " + money(amount) + " is saved on this phone. It sends by itself when you're back online.", "ok"); }
+      else hint("Saved " + category + " " + money(amount) + (entry.forMonth ? " for " + fmtForMonth(entry.forMonth) : "") + ". It goes into Excel at the next sync.", "ok");
       const sb = $("save"); sb.classList.add("done"); sb.innerHTML = '<span class="tick">✓</span>Saved';
       setTimeout(() => { sb.classList.remove("done"); sb.textContent = "Save entry"; }, 1400);
       $("amt").value = ""; $("noteA").value = ""; $("noteB").value = ""; $("desc").value = "";
@@ -1322,9 +1365,10 @@ body.locked { padding-bottom: 40px; }
     } finally { btn.disabled = false; renderNotif(); }
   };
   (async () => {
+    if (!("serviceWorker" in navigator)) return;
+    try { swReg = await navigator.serviceWorker.register("sw.js"); } catch (e) { return; }
     if (!pushSupported()) return;
     try {
-      swReg = await navigator.serviceWorker.register("sw.js");
       const sub = await swReg.pushManager.getSubscription();
       pushOn = !!sub && sameKey(sub) && Notification.permission === "granted";
     } catch (e) {}
@@ -1388,20 +1432,23 @@ body.locked { padding-bottom: 40px; }
     if (!store.ready() || loading) return;
     loading = true;
     try {
+      const sentNow = await flushOutbox();
+      if (sentNow && /^No signal/.test($("hint").textContent)) hint("Back online. Sent " + sentNow + (sentNow === 1 ? " entry" : " entries") + " that " + (sentNow === 1 ? "was" : "were") + " waiting.", "ok");
       const [c, o, t, e, sv, px] = await Promise.all([store.readJSON("data/config.json"), store.readJSON("data/overview.json"), store.readJSON("data/tithing.json"), store.listEntries(), store.readJSON("data/savings.json"), store.readJSON("data/prices.json").catch(() => null)]);
       if (!savingSaving) savings = sv; savingsLoaded = true; if (px) prices = px;
-      config = c; overview = o; pending = e;
+      config = c; overview = o; pending = withOutbox(e); rememberCats(c);
       if (!titheSaving) tithePaid = (t && t.paid) || {};
-      banner(""); renderAll();
+      banner(outbox().length ? "Couldn't send everything yet. " + waitingNote() : ""); renderAll();
       if (reportsLoaded || sheetOpen) loadReports();
     } catch (err) {
       if (err && err.auth) { store.forget(); lock(err.message); }
-      else banner("Can't reach GitHub right now. Showing what was last loaded.");
+      else { if (!pending.some((p) => p.waiting)) pending = withOutbox(pending); banner("Can't reach GitHub right now. " + (outbox().length ? waitingNote() : "Showing what was last loaded.")); renderAll(); }
     } finally { loading = false; }
   }
   if (store.ready()) { unlock(); refresh(); } else lock();
   setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 60000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
+  window.addEventListener("online", () => refresh());
 })();
 </script>
 
