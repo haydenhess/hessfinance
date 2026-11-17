@@ -593,6 +593,10 @@ body.locked { padding-bottom: 40px; }
   const inMonth = (m) => (x) => m < 0 || Number(x.d.slice(5, 7)) === m + 1;
   const sumBy = (rows) => rows.reduce((o, x) => { o[x.c] = (o[x.c] || 0) + x.a; return o; }, {});
   const total = (rows) => rows.reduce((a, x) => a + x.a, 0);
+  // Tithing is listed with expenses but never counted as spending
+  const isTithe = (x) => x.c === "Tithing";
+  const spending = (rows) => rows.filter((x) => !isTithe(x));
+  const tithing = (rows) => rows.filter(isTithe);
   function budgets() { return (overview && overview.budgets) || (config && config.budgets) || {}; }
   function lastMonthIdx() { const y = year(), now = new Date(); return y < now.getFullYear() ? 11 : now.getMonth(); }
 
@@ -672,7 +676,7 @@ body.locked { padding-bottom: 40px; }
   }
   function renderAdd() {
     const m = new Date().getMonth();
-    const spent = total(allExpenses().filter(inMonth(m)));
+    const spent = total(spending(allExpenses().filter(inMonth(m))));
     const earned = total(allIncome().filter(inMonth(m)));
     const bud = Object.values(budgets()).reduce((a, b) => a + (b || 0), 0);
     countTo($("spent"), spent); $("budget").textContent = money0(bud); $("earned").textContent = money0(earned);
@@ -739,6 +743,7 @@ body.locked { padding-bottom: 40px; }
     const hr = el("tr"); ["Category", "Spent", "Budget", "Left"].forEach((h) => hr.appendChild(el("th", null, h))); tbl.appendChild(hr);
     let tS = 0, tB = 0;
     cats.forEach((c) => {
+      if (c === "Tithing") return;
       const s = spent[c] || 0, b = (bud[c] || 0) * months;
       if (!s && !b) return;
       tS += s; tB += b;
@@ -748,9 +753,11 @@ body.locked { padding-bottom: 40px; }
       tbl.appendChild(tr);
     });
     const tr = el("tr", "total"); tr.append(el("td", null, "Total"), el("td", null, money0(tS)), el("td", null, money0(tB)), el("td", tS > tB ? "neg" : "pos", money0(tB - tS))); tbl.appendChild(tr);
+    if (spent.Tithing) { const tt = el("tr"); tt.append(el("td", null, "Tithing"), el("td", null, money0(spent.Tithing)), el("td", null, "–"), el("td", null, "")); tbl.appendChild(tt); }
     const st = $("budgetStats"); st.textContent = "";
     stat(st, "Spent", money0(tS)); stat(st, "Budget", money0(tB)); stat(st, tS > tB ? "Over" : "Left", money0(Math.abs(tB - tS)), tS > tB ? "neg" : "pos");
     $("budgetNote").textContent = m < 0 ? "Year view compares spending with " + months + " months of budget so far." : "Categories without a budget only show what you spent.";
+    if (spent.Tithing) $("budgetNote").textContent += " Tithing is shown below the total and is not counted in it.";
   }
 
   // ---------- SPENDING view
@@ -764,12 +771,12 @@ body.locked { padding-bottom: 40px; }
       r.append(el("span", null, c), bar, el("span", "amt num", money0(v))); box.appendChild(r);
     });
   }
-  function txList(box, rows, isIncome) {
+  function txList(box, rows, isIncome, tagTithe) {
     box.textContent = "";
     if (!rows.length) { box.appendChild(el("div", "empty", "Nothing here yet.")); return; }
     rows.slice().sort((a, b) => b.d.localeCompare(a.d)).forEach((x) => {
       const r = el("div", "item"); r.style.gridTemplateColumns = "1fr auto"; const t = el("div", "t");
-      const b = el("b", null, x.c); if (x.pending) b.appendChild(el("span", "tag", "not synced"));
+      const b = el("b", null, x.c); if (x.pending) b.appendChild(el("span", "tag", "not synced")); if (tagTithe && !isIncome && isTithe(x)) b.appendChild(el("span", "tag", "not in total"));
       const extra = [fmtDay(x.d)]; if (isIncome && x.desc) extra.push(x.desc); if (x.n) extra.push(x.n);
       t.append(b, el("small", null, extra.join(" · ")));
       r.append(t, el("span", "num" + (isIncome ? " inc" : ""), (isIncome ? "+" : "") + money(x.a))); box.appendChild(r);
@@ -792,11 +799,15 @@ body.locked { padding-bottom: 40px; }
       note.append((rows.length ? rows.length + " match" + (rows.length === 1 ? "" : "es") : "No matches") + " in " + (m < 0 ? "all of " + year() : MONTHS[m]) + ".");
       if (m >= 0) { const b = el("button", null, "Search all of " + year()); b.type = "button"; b.onclick = () => { sel.spend = -1; renderSpend(); }; note.appendChild(b); }
     } else note.hidden = true;
-    const t = total(rows); const st = $("spendStats"); st.textContent = "";
-    const big = rows.reduce((a, x) => (x.a > a ? x.a : a), 0);
-    stat(st, query ? "Matches total" : "Total", money0(t)); stat(st, "Purchases", String(rows.length)); stat(st, "Largest", money0(big));
+    // a search totals whatever matched; otherwise tithing is listed but left out of the numbers
+    const counted = query ? rows : spending(rows), tithe = query ? 0 : total(tithing(rows));
+    const t = total(counted); const st = $("spendStats"); st.textContent = "";
+    const big = counted.reduce((a, x) => (x.a > a ? x.a : a), 0);
+    stat(st, query ? "Matches total" : "Total", money0(t)); stat(st, "Purchases", String(counted.length)); stat(st, "Largest", money0(big));
+    let tn = $("spendTitheNote"); if (!tn) { tn = el("p", "note"); tn.id = "spendTitheNote"; st.after(tn); }
+    tn.hidden = !tithe; tn.textContent = tithe ? "Tithing (" + money0(tithe) + ") is listed below but not counted in the total." : "";
     hbars($("spendCats"), sumBy(rows));
-    $("spendCount").textContent = rows.length; txList($("spendList"), rows, false);
+    $("spendCount").textContent = rows.length; txList($("spendList"), rows, false, !query);
   }
 
   // ---------- INCOME view
@@ -810,7 +821,8 @@ body.locked { padding-bottom: 40px; }
     stat(st, m < 0 ? "This year" : MONTHS[m].slice(0, 3), money0(total(rows)), "pos");
     stat(st, "Year so far", money0(ytd)); stat(st, "Monthly avg", money0(ytd / (last + 1)));
     const exp = allExpenses();
-    const spentBy = Array.from({ length: 12 }, (_, k) => total(exp.filter(inMonth(k))));
+    const spentBy = Array.from({ length: 12 }, (_, k) => total(spending(exp.filter(inMonth(k)))));
+    const titheBy = Array.from({ length: 12 }, (_, k) => total(tithing(exp.filter(inMonth(k)))));
     const cols = $("incCols"); cols.textContent = ""; const max = Math.max(1, ...byMonth, ...spentBy);
     byMonth.forEach((v, k) => {
       const g = el("div", "g" + (k === m ? " sel" : "") + (k > last ? " future" : "")); const pair = el("div", "pair");
@@ -823,8 +835,12 @@ body.locked { padding-bottom: 40px; }
     });
     const inc = m < 0 ? byMonth.slice(0, last + 1).reduce((x, y) => x + y, 0) : byMonth[m];
     const out = m < 0 ? spentBy.slice(0, last + 1).reduce((x, y) => x + y, 0) : spentBy[m];
-    const net = inc - out, vn = $("vsNote"); vn.textContent = "";
-    vn.append((m < 0 ? "This year" : MONTHS[m]) + " you earned ", el("b", null, money0(inc)), " and spent ", el("b", null, money0(out)), net >= 0 ? ", saving " : ", which is ", el("b", net >= 0 ? "pos" : "neg", money0(Math.abs(net))), net >= 0 ? "." : " more than you earned.");
+    const tithe = m < 0 ? titheBy.slice(0, last + 1).reduce((x, y) => x + y, 0) : titheBy[m];
+    const net = inc - out - tithe, vn = $("vsNote"); vn.textContent = "";
+    vn.append((m < 0 ? "This year" : MONTHS[m]) + " you earned ", el("b", null, money0(inc)));
+    if (tithe > 0) vn.append(", spent ", el("b", null, money0(out)), " and paid ", el("b", null, money0(tithe)), " in tithing");
+    else vn.append(" and spent ", el("b", null, money0(out)));
+    vn.append(net >= 0 ? ", keeping " : ", which is ", el("b", net >= 0 ? "pos" : "neg", money0(Math.abs(net))), net >= 0 ? "." : " more than you earned.");
     hbars($("incCats"), sumBy(rows), "var(--good)");
     $("incCount").textContent = rows.length; txList($("incList"), rows, true);
   }
@@ -1194,7 +1210,7 @@ body.locked { padding-bottom: 40px; }
     box.append(kind, el("h2", null, r.title), el("p", "lead", r.body));
     const st = el("div", "stats");
     if (r.type === "yearly") {
-      stat(st, "Earned", money0(r.earned), "pos"); stat(st, "Spent", money0(r.spent)); stat(st, r.net >= 0 ? "Saved" : "Short", money0(Math.abs(r.net)), r.net >= 0 ? "pos" : "neg");
+      stat(st, "Earned", money0(r.earned), "pos"); stat(st, "Spent", money0(r.spent)); if (r.tithing != null) stat(st, "Tithing", money0(r.tithing)); stat(st, r.net >= 0 ? (r.tithing != null ? "Kept" : "Saved") : "Short", money0(Math.abs(r.net)), r.net >= 0 ? "pos" : "neg");
       box.appendChild(st);
       box.appendChild(el("h3", null, "Month by month"));
       const cols = el("div", "vs"); const max = Math.max(1, ...r.months.map((m) => Math.max(m.earned, m.spent)));
@@ -1212,11 +1228,12 @@ body.locked { padding-bottom: 40px; }
     } else {
       if (r.earned > 0) stat(st, "Earned", money0(r.earned), "pos");
       stat(st, "Spent", money0(r.spent));
+      if (r.tithing > 0) stat(st, "Tithing", money0(r.tithing));
       stat(st, "Most on", r.top ? r.top.c : "Nothing");
       if (r.earned <= 0) stat(st, "Purchases", String((r.expenses || []).length));
       box.appendChild(st);
       box.appendChild(el("h3", null, "By category")); const cats = el("div"); box.appendChild(cats); hbars(cats, Object.fromEntries(Object.entries(r.byCategory || {}).filter(([, v]) => v > 0)));
-      box.appendChild(el("h3", null, "Every expense")); const ex = el("div", "list"); box.appendChild(ex); txList(ex, r.expenses || [], false);
+      box.appendChild(el("h3", null, "Every expense")); const ex = el("div", "list"); box.appendChild(ex); txList(ex, r.expenses || [], false, r.tithing != null);
       if ((r.income || []).length) { box.appendChild(el("h3", null, "Income")); const inc = el("div", "list"); box.appendChild(inc); txList(inc, r.income, true); }
     }
   }
